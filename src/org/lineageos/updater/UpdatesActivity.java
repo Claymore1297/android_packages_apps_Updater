@@ -15,6 +15,8 @@
  */
 package org.lineageos.updater;
 
+import android.Manifest;
+import android.app.Activity;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
@@ -27,6 +29,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
+import android.os.SystemProperties;
 import android.support.design.widget.AppBarLayout;
 import android.support.design.widget.CollapsingToolbarLayout;
 import android.support.design.widget.Snackbar;
@@ -49,25 +52,40 @@ import android.widget.Spinner;
 import android.widget.Switch;
 import android.widget.TextView;
 
+import com.aicp.updater3.R;
+
 import org.json.JSONException;
+import org.json.JSONArray;
+import org.json.JSONObject;
 import org.lineageos.updater.controller.UpdaterController;
 import org.lineageos.updater.controller.UpdaterService;
 import org.lineageos.updater.download.DownloadClient;
 import org.lineageos.updater.misc.BuildInfoUtils;
 import org.lineageos.updater.misc.Constants;
+import org.lineageos.updater.misc.FileUtils;
+import org.lineageos.updater.misc.PermissionsUtils;
 import org.lineageos.updater.misc.StringGenerator;
 import org.lineageos.updater.misc.Utils;
+import org.lineageos.updater.model.Update;
 import org.lineageos.updater.model.UpdateInfo;
+import com.aicp.updater3.R;
+import org.lineageos.updater.model.UpdateStatus;
 
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileWriter;
+import java.io.FileReader;
+import java.io.InputStreamReader;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
 import java.util.UUID;
 
 public class UpdatesActivity extends UpdatesListActivity {
 
     private static final String TAG = "UpdatesActivity";
+    private static final boolean DEBUG = false;
     private UpdaterService mUpdaterService;
     private BroadcastReceiver mBroadcastReceiver;
 
@@ -76,9 +94,19 @@ public class UpdatesActivity extends UpdatesListActivity {
     private View mRefreshIconView;
     private RotateAnimation mRefreshAnimation;
 
+    private static final int READ_REQUEST_CODE = 42;
+
+    // Storage Permissions
+    private static final int STORAGE_PERMISSIONS_REQUEST_CODE = 0;
+    private static final String[] REQUIRED_STORAGE_PERMISSIONS = new String[]{
+            Manifest.permission.READ_EXTERNAL_STORAGE,
+            Manifest.permission.WRITE_EXTERNAL_STORAGE
+    };
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
         setContentView(R.layout.activity_updates);
 
         RecyclerView recyclerView = (RecyclerView) findViewById(R.id.recycler_view);
@@ -200,10 +228,13 @@ public class UpdatesActivity extends UpdatesListActivity {
                 showPreferencesDialog();
                 return true;
             }
-            case R.id.menu_show_changelog: {
-                Intent openUrl = new Intent(Intent.ACTION_VIEW,
-                        Uri.parse(Utils.getChangelogURL(this)));
-                startActivity(openUrl);
+            case R.id.menu_local_update: {
+                boolean hasPermission = PermissionsUtils.checkAndRequestPermissions(
+                      this, REQUIRED_STORAGE_PERMISSIONS,
+                      STORAGE_PERMISSIONS_REQUEST_CODE);
+                if (hasPermission) {
+                  performFileSearch();
+                }
                 return true;
             }
         }
@@ -237,7 +268,7 @@ public class UpdatesActivity extends UpdatesListActivity {
 
     private void loadUpdatesList(File jsonFile, boolean manualRefresh)
             throws IOException, JSONException {
-        Log.d(TAG, "Adding remote updates");
+        if (DEBUG) Log.d(TAG, "Adding remote updates");
         UpdaterController controller = mUpdaterService.getUpdaterController();
         boolean newUpdates = false;
 
@@ -286,6 +317,70 @@ public class UpdatesActivity extends UpdatesListActivity {
         }
     }
 
+    private void convertBackendResponse(File json){
+        String backendDate = null;
+        String backendUTS = null;
+        String backendAICPVersion = null;
+        String backendSize = null;
+        String backendMd5 = null;
+        String device = SystemProperties.get(Constants.PROP_DEVICE);
+        String releasetype = SystemProperties.get(Constants.PROP_RELEASE_TYPE);
+        String romversion = SystemProperties.get(Constants.PROP_BUILD_VERSION);
+            try (BufferedReader reader = new BufferedReader(new FileReader((json)))) {
+                String line = reader.readLine();
+
+                final String[] pair = line.split(" ");
+                int backendResponseValues = pair.length;
+                if (backendResponseValues != 6) {
+                    Log.e(TAG, "backend did not returned the correct amount of values");
+                    json.delete();
+                    return;
+                }
+                backendDate = pair[0];
+                backendUTS = pair[1];
+                backendAICPVersion = pair[2];
+                backendSize = pair[4];
+                backendMd5 = pair[5];
+
+            } catch (IOException uex) {
+                Log.e(TAG, "could not read file: " +json);
+            } catch (NullPointerException npe) {
+                Log.e(TAG,"response of backend returned a empty set");
+                json.delete();
+                return;
+            }
+
+        String message;
+        JSONObject jsonObj = new JSONObject();
+        JSONArray Jarray = new JSONArray();
+        JSONObject Jitem = new JSONObject();
+        String downloadUrl = null;
+        downloadUrl = getString(R.string.updater_download_server_base_url)+"device/"+device+"/"+releasetype+"/aicp_"+device+"_"+backendAICPVersion+"-"+releasetype+"-"+backendDate+".zip";
+        try {
+            Jitem.put("datetime", backendUTS);
+            Jitem.put("filename", "aicp_"+device+"_"+backendAICPVersion+"-"+releasetype+"-"+backendDate+".zip");
+            Jitem.put("id", backendMd5);
+            Jitem.put("romtype", releasetype);
+            Jitem.put("size", backendSize);
+            Jitem.put("url", downloadUrl);
+            Jitem.put("version", romversion);
+            Jarray.put(Jitem);
+            jsonObj.put("response", Jarray);
+        } catch (JSONException exception) {
+            Log.e(TAG, "could not create JSON object");
+            json.delete();
+        }
+
+        if (DEBUG) Log.d(TAG, "JSON Object: " + jsonObj);
+        if (DEBUG) Log.d(TAG, "writing JSON Object to file: " + json);
+        try (FileWriter file = new FileWriter(json)) {
+            file.write(jsonObj.toString());
+        } catch (IOException ex) {
+            Log.e(TAG, "could not write JSON-object to file: "+jsonObj);
+        }
+
+    }
+
     private void processNewJson(File json, File jsonNew, boolean manualRefresh) {
         try {
             loadUpdatesList(jsonNew, manualRefresh);
@@ -302,7 +397,8 @@ public class UpdatesActivity extends UpdatesListActivity {
             jsonNew.renameTo(json);
         } catch (IOException | JSONException e) {
             Log.e(TAG, "Could not read json", e);
-            showSnackbar(R.string.snack_updates_check_failed, Snackbar.LENGTH_LONG);
+            jsonNew.delete();
+//            showSnackbar(R.string.snack_updates_check_failed, Snackbar.LENGTH_LONG);
         }
     }
 
@@ -310,7 +406,7 @@ public class UpdatesActivity extends UpdatesListActivity {
         final File jsonFile = Utils.getCachedUpdateList(this);
         final File jsonFileTmp = new File(jsonFile.getAbsolutePath() + UUID.randomUUID());
         String url = Utils.getServerURL(this);
-        Log.d(TAG, "Checking " + url);
+        if (DEBUG) Log.d(TAG, "Checking " + url);
 
         DownloadClient.DownloadCallback callback = new DownloadClient.DownloadCallback() {
             @Override
@@ -333,7 +429,12 @@ public class UpdatesActivity extends UpdatesListActivity {
             public void onSuccess(File destination) {
                 runOnUiThread(() -> {
                     Log.d(TAG, "List downloaded");
-                    processNewJson(jsonFile, jsonFileTmp, manualRefresh);
+                    convertBackendResponse(jsonFileTmp);
+                    if (jsonFileTmp.exists()) {
+                        processNewJson(jsonFile, jsonFileTmp, manualRefresh);
+                    }else {
+                        Log.e(TAG, "abort update-check due backend error");
+                    }
                     refreshAnimationStop();
                 });
             }
@@ -449,5 +550,71 @@ public class UpdatesActivity extends UpdatesListActivity {
                     mUpdaterService.getUpdaterController().setPerformanceMode(enableABPerfMode);
                 })
                 .show();
+    }
+
+    private void performFileSearch() {
+        Intent chooseFile = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        chooseFile.setType("application/zip");
+        Intent intent = Intent.createChooser(chooseFile, "Choose a file");
+        startActivityForResult(intent, READ_REQUEST_CODE);
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent resultData) {
+        if (requestCode == READ_REQUEST_CODE && resultCode == Activity.RESULT_OK) {
+            Uri uri = null;
+            if (resultData != null) {
+                uri = resultData.getData();
+                addLocalUpdateInfo(uri);
+            }
+        }
+        super.onActivityResult(requestCode, resultCode, resultData);
+    }
+
+    private void addLocalUpdateInfo(Uri uri) {
+        String path = FileUtils.getRealPath(this, uri);
+        Update localUpdate = new Update();
+        File file = new File(path);
+        localUpdate.setFile(file);
+        localUpdate.setName(file.getName());
+        localUpdate.setFileSize(file.length());
+        localUpdate.setTimestamp(file.lastModified()/1000L);
+        localUpdate.setDownloadId(String.valueOf(new Date().getTime()/1000L));
+        localUpdate.setVersion("");
+        localUpdate.setPersistentStatus(UpdateStatus.Persistent.LOCAL);
+        localUpdate.setStatus(UpdateStatus.DOWNLOADED);
+
+        Log.d(TAG, "Adding local updates");
+        UpdaterController controller = mUpdaterService.getUpdaterController();
+        boolean newUpdates = false;
+
+        List<UpdateInfo> updates = new ArrayList<>();
+        updates.add(localUpdate);
+        List<String> updatesOnline = new ArrayList<>();
+        for (UpdateInfo update : updates) {
+            newUpdates |= controller.addUpdate(update);
+            updatesOnline.add(0, update.getDownloadId());
+        }
+
+        controller.setUpdatesAvailableOnline(updatesOnline, false);
+
+        controller.verifyUpdateAsync(localUpdate.getDownloadId());
+        controller.notifyUpdateChange(localUpdate.getDownloadId());
+
+        List<String> updateIds = new ArrayList<>();
+        List<UpdateInfo> sortedUpdates = controller.getUpdates();
+        if (sortedUpdates.isEmpty()) {
+            findViewById(R.id.no_new_updates_view).setVisibility(View.VISIBLE);
+            findViewById(R.id.recycler_view).setVisibility(View.GONE);
+        } else {
+            findViewById(R.id.no_new_updates_view).setVisibility(View.GONE);
+            findViewById(R.id.recycler_view).setVisibility(View.VISIBLE);
+            sortedUpdates.sort((u1, u2) -> Long.compare(u2.getTimestamp(), u1.getTimestamp()));
+            for (UpdateInfo update : sortedUpdates) {
+                updateIds.add(update.getDownloadId());
+            }
+            mAdapter.setData(updateIds);
+            mAdapter.notifyDataSetChanged();
+        }
     }
 }

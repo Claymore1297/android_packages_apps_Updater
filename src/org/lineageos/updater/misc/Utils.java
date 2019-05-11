@@ -34,17 +34,22 @@ import android.widget.Toast;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
-import org.lineageos.updater.R;
+import com.aicp.updater3.R;
 import org.lineageos.updater.UpdatesDbHelper;
 import org.lineageos.updater.controller.UpdaterService;
 import org.lineageos.updater.model.UpdateBaseInfo;
 import org.lineageos.updater.model.Update;
 import org.lineageos.updater.model.UpdateInfo;
+import org.lineageos.updater.model.UpdateStatus;
 
 import java.io.BufferedReader;
+import java.io.BufferedWriter;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.IOException;
+import java.io.OutputStreamWriter;
+import java.io.Writer;
 import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.HashSet;
@@ -111,11 +116,18 @@ public class Utils {
         return true;
     }
 
-    public static boolean canInstall(UpdateBaseInfo update) {
+    public static boolean canInstall(UpdateInfo update) {
+
+        final String[] split = update.getName().split("-");
+        if (split.length != 4) {
+            Log.e(TAG, "Improperly named file. Cannot determine version.");
+            return false;
+        }
+        final boolean updateVersionChecked = split[1].equals(SystemProperties.get(Constants.PROP_BUILD_VERSION));
+        final boolean updateBuildTypeChecked = split[2].equalsIgnoreCase(SystemProperties.get(Constants.PROP_RELEASE_TYPE));
         return (SystemProperties.getBoolean(Constants.PROP_UPDATER_ALLOW_DOWNGRADING, false) ||
                 update.getTimestamp() > SystemProperties.getLong(Constants.PROP_BUILD_DATE, 0)) &&
-                update.getVersion().equalsIgnoreCase(
-                        SystemProperties.get(Constants.PROP_BUILD_VERSION));
+                updateVersionChecked && updateBuildTypeChecked;
     }
 
     public static List<UpdateInfo> parseJson(File file, boolean compatibleOnly)
@@ -154,7 +166,7 @@ public class Utils {
         String incrementalVersion = SystemProperties.get(Constants.PROP_BUILD_VERSION_INCREMENTAL);
         String device = SystemProperties.get(Constants.PROP_NEXT_DEVICE,
                 SystemProperties.get(Constants.PROP_DEVICE));
-        String type = SystemProperties.get(Constants.PROP_RELEASE_TYPE).toLowerCase(Locale.ROOT);
+        String type = "&type="+SystemProperties.get(Constants.PROP_RELEASE_TYPE);
 
         String serverUrl = SystemProperties.get(Constants.PROP_UPDATER_URI);
         if (serverUrl.trim().isEmpty()) {
@@ -162,14 +174,7 @@ public class Utils {
         }
 
         return serverUrl.replace("{device}", device)
-                .replace("{type}", type)
-                .replace("{incr}", incrementalVersion);
-    }
-
-    public static String getChangelogURL(Context context) {
-        String device = SystemProperties.get(Constants.PROP_NEXT_DEVICE,
-                SystemProperties.get(Constants.PROP_DEVICE));
-        return context.getString(R.string.menu_changelog_url, device);
+                .replace("{type}", type);
     }
 
     public static void triggerUpdate(Context context, String downloadId) {
@@ -395,4 +400,22 @@ public class Utils {
                 return AlarmManager.INTERVAL_DAY * 30;
         }
     }
+
+    public static void createORSfile(){
+       final String aicpCreateORSFile = SystemProperties.get("ro.aicp.create.ors.file","false");
+       if (aicpCreateORSFile.equals("true"))
+       {
+           Log.d(TAG, "Property: ro.aicp.create.ors.file: " + aicpCreateORSFile + " - writing openrecoveryscript file manually");
+           Writer writer = null;
+           try {
+               writer = new BufferedWriter(new OutputStreamWriter(
+               new FileOutputStream("/cache/recovery/openrecoveryscript"), "utf-8"));
+               writer.write("install @/cache/recovery/block.map");
+           } catch (IOException ex) {
+               Log.e(TAG, "failed to write openrecoveryscript", ex);
+           } finally {
+               try {writer.close();} catch (Exception ex) {/*ignore*/}
+           }
+       }
+   }
 }

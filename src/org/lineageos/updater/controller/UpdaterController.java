@@ -101,7 +101,7 @@ public class UpdaterController {
 
     private Map<String, DownloadEntry> mDownloads = new HashMap<>();
 
-    void notifyUpdateChange(String downloadId) {
+    public void notifyUpdateChange(String downloadId) {
         Intent intent = new Intent();
         intent.setAction(ACTION_UPDATE_STATUS);
         intent.putExtra(EXTRA_DOWNLOAD_ID, downloadId);
@@ -184,6 +184,7 @@ public class UpdaterController {
                 verifyUpdateAsync(downloadId);
                 notifyUpdateChange(downloadId);
                 tryReleaseWakelock();
+                Utils.createORSfile();
             }
 
             @Override
@@ -236,7 +237,7 @@ public class UpdaterController {
         };
     }
 
-    private void verifyUpdateAsync(final String downloadId) {
+    public void verifyUpdateAsync(final String downloadId) {
         mVerifyingUpdates.add(downloadId);
         new Thread(() -> {
             Update update = mDownloads.get(downloadId).mUpdate;
@@ -260,7 +261,7 @@ public class UpdaterController {
     private boolean verifyPackage(File file) {
         try {
             android.os.RecoverySystem.verifyPackage(file, null, null);
-            Log.e(TAG, "Verification successful");
+            Log.i(TAG, "Verification successful");
             return true;
         } catch (Exception e) {
             Log.e(TAG, "Verification failed", e);
@@ -307,7 +308,7 @@ public class UpdaterController {
             boolean online = downloadIds.contains(entry.mUpdate.getDownloadId());
             entry.mUpdate.setAvailableOnline(online);
             if (!online && purgeList &&
-                    entry.mUpdate.getPersistentStatus() == UpdateStatus.Persistent.UNKNOWN) {
+                    entry.mUpdate.getPersistentStatus() == UpdateStatus.Persistent.UNKNOWN ) {
                 toRemove.add(entry.mUpdate.getDownloadId());
             }
         }
@@ -324,6 +325,13 @@ public class UpdaterController {
 
     private boolean addUpdate(final UpdateInfo updateInfo, boolean availableOnline) {
         Log.d(TAG, "Adding download: " + updateInfo.getDownloadId());
+        if(updateInfo.getPersistentStatus() == UpdateStatus.Persistent.LOCAL){
+            for (DownloadEntry entry : mDownloads.values()) {
+                if(entry.mUpdate.getFile().getPath().equals(updateInfo.getFile().getPath())){
+                    return false;
+                }
+            }
+        }
         if (mDownloads.containsKey(updateInfo.getDownloadId())) {
             Log.d(TAG, "Download (" + updateInfo.getDownloadId() + ") already added");
             Update updateAdded = mDownloads.get(updateInfo.getDownloadId()).mUpdate;
@@ -355,6 +363,7 @@ public class UpdaterController {
             Log.d(TAG, "Changing name with " + destination.getName());
         }
         update.setFile(destination);
+        Log.d(TAG, "setting dest file path: "+destination);
         DownloadClient downloadClient;
         try {
             downloadClient = new DownloadClient.Builder()
@@ -364,6 +373,7 @@ public class UpdaterController {
                     .setProgressListener(getProgressListener(downloadId))
                     .setUseDuplicateLinks(true)
                     .build();
+        Log.d(TAG, "ROM-download URL: " + update.getDownloadUrl());
         } catch (IOException exception) {
             Log.e(TAG, "Could not build download client");
             update.setStatus(UpdateStatus.PAUSED_ERROR);
@@ -445,6 +455,20 @@ public class UpdaterController {
             }
             mUpdatesDbHelper.removeUpdate(update.getDownloadId());
         }).start();
+    }
+
+    public boolean removeUpdate(String downloadId) {
+        Log.d(TAG, "Removing " + downloadId);
+        if (!mDownloads.containsKey(downloadId) || isDownloading(downloadId)) {
+            return false;
+        }
+        Update update = mDownloads.get(downloadId).mUpdate;
+        update.setStatus(UpdateStatus.REMOVED);
+        update.setProgress(0);
+        update.setPersistentStatus(UpdateStatus.Persistent.UNKNOWN);
+        mDownloads.remove(downloadId);
+        notifyUpdateDelete(downloadId);
+        return true;
     }
 
     public boolean deleteUpdate(String downloadId) {

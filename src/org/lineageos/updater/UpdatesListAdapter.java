@@ -20,6 +20,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.res.Resources;
+import android.net.Uri;
 import android.os.BatteryManager;
 import android.os.PowerManager;
 import android.preference.PreferenceManager;
@@ -45,6 +46,7 @@ import android.widget.CheckBox;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 
+import com.aicp.updater3.R;
 import org.lineageos.updater.controller.UpdaterController;
 import org.lineageos.updater.controller.UpdaterService;
 import org.lineageos.updater.misc.BuildInfoUtils;
@@ -65,12 +67,16 @@ public class UpdatesListAdapter extends RecyclerView.Adapter<UpdatesListAdapter.
 
     private static final String TAG = "UpdateListAdapter";
 
+    private static final String GAPPS_SUBSTRING = "gapps";
+    private static final String TWRP_SUBSTRING = "twrp";
+
     private final float mAlphaDisabledValue;
 
     private List<String> mDownloadIds;
     private String mSelectedDownload;
     private UpdaterController mUpdaterController;
     private UpdatesListActivity mActivity;
+    private boolean mIsGappsOrTWRP = false;
 
     private enum Action {
         DOWNLOAD,
@@ -193,9 +199,21 @@ public class UpdatesListAdapter extends RecyclerView.Adapter<UpdatesListAdapter.
         } else if (update.getPersistentStatus() == UpdateStatus.Persistent.VERIFIED) {
             viewHolder.itemView.setOnLongClickListener(
                     getLongClickListener(update, true, viewHolder.mBuildDate));
-            setButtonAction(viewHolder.mAction,
-                    Utils.canInstall(update) ? Action.INSTALL : Action.DELETE,
-                    downloadId, !isBusy());
+
+            if (Utils.canInstall(update)) {
+                setButtonAction(viewHolder.mAction, Action.INSTALL,
+                        downloadId, !isBusy());
+            } else {
+                String filename = update.getName();
+                if (filename.indexOf(GAPPS_SUBSTRING) != -1 || filename.indexOf(TWRP_SUBSTRING) != -1) {
+                    setButtonAction(viewHolder.mAction, Action.INSTALL,
+                            downloadId, !isBusy());
+                    mIsGappsOrTWRP = true;
+                } else {
+                    setButtonAction(viewHolder.mAction, Action.DELETE,
+                            downloadId, !isBusy());
+                }
+            }
         } else if (!Utils.canInstall(update)) {
             viewHolder.itemView.setOnLongClickListener(
                     getLongClickListener(update, false, viewHolder.mBuildDate));
@@ -242,6 +260,9 @@ public class UpdatesListAdapter extends RecyclerView.Adapter<UpdatesListAdapter.
             case UpdateStatus.Persistent.INCOMPLETE:
                 activeLayout = true;
                 break;
+            case UpdateStatus.Persistent.LOCAL:
+                activeLayout = false;
+                break;
             default:
                 throw new RuntimeException("Unknown update status");
         }
@@ -250,6 +271,7 @@ public class UpdatesListAdapter extends RecyclerView.Adapter<UpdatesListAdapter.
                 DateFormat.LONG, update.getTimestamp());
         String buildVersion = mActivity.getString(R.string.list_build_version,
                 update.getVersion());
+        if(update.getVersion().isEmpty()) buildVersion = update.getName();
         viewHolder.mBuildDate.setText(buildDate);
         viewHolder.mBuildVersion.setText(buildVersion);
         viewHolder.mBuildVersion.setCompoundDrawables(null, null, null, null);
@@ -354,7 +376,7 @@ public class UpdatesListAdapter extends RecyclerView.Adapter<UpdatesListAdapter.
                 UpdateInfo update = mUpdaterController.getUpdate(downloadId);
                 final boolean canInstall = Utils.canInstall(update);
                 clickListener = enabled ? view -> {
-                    if (canInstall) {
+                    if (canInstall || mIsGappsOrTWRP) {
                         getInstallDialog(downloadId).show();
                     } else {
                         mActivity.showSnackbar(R.string.snack_update_not_installable,
@@ -417,6 +439,17 @@ public class UpdatesListAdapter extends RecyclerView.Adapter<UpdatesListAdapter.
                         (dialog, which) -> {
                             mUpdaterController.pauseDownload(downloadId);
                             mUpdaterController.deleteUpdate(downloadId);
+                        })
+                .setNegativeButton(android.R.string.cancel, null);
+    }
+
+    private AlertDialog.Builder getRemoveDialog(final String downloadId) {
+        return new AlertDialog.Builder(mActivity)
+                .setTitle(R.string.confirm_remove_dialog_title)
+                .setMessage(R.string.confirm_remove_dialog_message)
+                .setPositiveButton(android.R.string.ok,
+                        (dialog, which) -> {
+                            mUpdaterController.removeUpdate(downloadId);
                         })
                 .setNegativeButton(android.R.string.cancel, null);
     }
@@ -489,15 +522,26 @@ public class UpdatesListAdapter extends RecyclerView.Adapter<UpdatesListAdapter.
         popupMenu.inflate(R.menu.menu_action_mode);
 
         MenuBuilder menu = (MenuBuilder) popupMenu.getMenu();
+        menu.findItem(R.id.menu_show_changelog).setVisible(update.getAvailableOnline());
         menu.findItem(R.id.menu_delete_action).setVisible(canDelete);
+        menu.findItem(R.id.menu_remove_action).setVisible(
+                update.getPersistentStatus() == UpdateStatus.Persistent.VERIFIED);
         menu.findItem(R.id.menu_copy_url).setVisible(update.getAvailableOnline());
         menu.findItem(R.id.menu_export_update).setVisible(
                 update.getPersistentStatus() == UpdateStatus.Persistent.VERIFIED);
 
         popupMenu.setOnMenuItemClickListener(item -> {
             switch (item.getItemId()) {
+                case R.id.menu_show_changelog:
+                    Intent openUrl = new Intent(Intent.ACTION_VIEW,
+                            Uri.parse(update.getDownloadUrl() + ".html"));
+                    mActivity.startActivity(openUrl);
+                    return true;
                 case R.id.menu_delete_action:
                     getDeleteDialog(update.getDownloadId()).show();
+                    return true;
+                case R.id.menu_remove_action:
+                    getRemoveDialog(update.getDownloadId()).show();
                     return true;
                 case R.id.menu_copy_url:
                     Utils.addToClipboard(mActivity,
@@ -536,9 +580,8 @@ public class UpdatesListAdapter extends RecyclerView.Adapter<UpdatesListAdapter.
     private void showInfoDialog() {
         String messageString = String.format(StringGenerator.getCurrentLocale(mActivity),
                 mActivity.getString(R.string.blocked_update_dialog_message),
-                mActivity.getString(R.string.blocked_update_info_url));
+                mActivity.getString(R.string.blocked_update_info_txt));
         SpannableString message = new SpannableString(messageString);
-        Linkify.addLinks(message, Linkify.WEB_URLS);
         AlertDialog dialog = new AlertDialog.Builder(mActivity)
                 .setTitle(R.string.blocked_update_dialog_title)
                 .setPositiveButton(android.R.string.ok, null)
