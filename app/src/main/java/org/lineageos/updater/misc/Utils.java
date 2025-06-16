@@ -120,7 +120,6 @@ public class Utils {
     public static boolean canInstall(UpdateBaseInfo update) {
         boolean allowMajorUpgrades = SystemProperties.getBoolean(
                 Constants.PROP_ALLOW_MAJOR_UPGRADES, false);
-
         return (SystemProperties.getBoolean(Constants.PROP_UPDATER_ALLOW_DOWNGRADING, false) ||
                 update.getTimestamp() > SystemProperties.getLong(Constants.PROP_BUILD_DATE, 0)) &&
                 compareVersions(
